@@ -8,7 +8,7 @@ block_size = 256 # what is the maximum context length for predictions?
 max_iters = 5000
 eval_interval = 500
 learning_rate = 3e-4
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
+device = 'mps' if torch.backends.mps.is_available() else 'cpu'
 eval_iters = 200
 n_embd = 384
 n_head = 6
@@ -127,8 +127,8 @@ class Block(nn.Module):
         head_size = n_embd // n_head
         self.sa = MultiHeadAttention(n_head, head_size)
         self.ffwd = FeedFoward(n_embd)
-        self.ln1 = nn.LayerNorm(n_embd)
-        self.ln2 = nn.LayerNorm(n_embd)
+        self.ln1 = nn.RMSNorm(n_embd)
+        self.ln2 = nn.RMSNorm(n_embd)
 
     def forward(self, x):
         x = x + self.sa(self.ln1(x))
@@ -143,7 +143,7 @@ class GPTLanguageModel(nn.Module):
         self.token_embedding_table = nn.Embedding(vocab_size, n_embd)
         self.position_embedding_table = nn.Embedding(block_size, n_embd)
         self.blocks = nn.Sequential(*[Block(n_embd, n_head=n_head) for _ in range(n_layer)])
-        self.ln_f = nn.LayerNorm(n_embd) # final layer norm
+        self.ln_f = nn.RMSNorm(n_embd) # final layer norm
         self.lm_head = nn.Linear(n_embd, vocab_size)
 
         # better init, not covered in the original GPT video, but important, will cover in followup video
