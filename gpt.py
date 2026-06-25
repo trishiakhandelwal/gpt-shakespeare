@@ -61,6 +61,12 @@ def estimate_loss():
     model.train()
     return out
 
+def rotate_half(input):
+        in1 = input[..., ::2]
+        in2 = input[..., 1::2]
+        out = torch.stack((-in2, in1), dim=-1)
+        return out.flatten(-2)
+
 class Head(nn.Module):
     """ one head of self-attention """
 
@@ -70,7 +76,6 @@ class Head(nn.Module):
         self.query = nn.Linear(n_embd, head_size, bias=False)
         self.value = nn.Linear(n_embd, head_size, bias=False)
         self.register_buffer('tril', torch.tril(torch.ones(block_size, block_size)))
-
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
@@ -79,6 +84,20 @@ class Head(nn.Module):
         B,T,C = x.shape
         k = self.key(x)   # (B,T,hs)
         q = self.query(x) # (B,T,hs)
+        hs = q.shape[-1]
+        positions = torch.arange(T, device=device)
+        freqs = torch.tensor([10000**(-2*i/hs) for i in range(hs//2)], device=device)
+        angles = positions[:, None] * freqs[None, :]
+        sin = torch.sin(angles)
+        cos = torch.cos(angles)
+        sin = torch.repeat_interleave(sin, 2, dim=-1)
+        cos = torch.repeat_interleave(cos, 2, dim=-1)
+        k = k*cos + rotate_half(k)*sin
+        q = q*cos + rotate_half(q)*sin
+        # print(q.shape)
+        # print(cos.shape)
+        # print(rotate_half(q).shape)
+
         # compute attention scores ("affinities")
         wei = q @ k.transpose(-2,-1) * k.shape[-1]**-0.5 # (B, T, hs) @ (B, hs, T) -> (B, T, T)
         wei = wei.masked_fill(self.tril[:T, :T] == 0, float('-inf')) # (B, T, T)
@@ -141,7 +160,7 @@ class GPTLanguageModel(nn.Module):
         super().__init__()
         # each token directly reads off the logits for the next token from a lookup table
         self.token_embedding_table = nn.Embedding(vocab_size, n_embd)
-        self.position_embedding_table = nn.Embedding(block_size, n_embd)
+        # self.position_embedding_table = nn.Embedding(block_size, n_embd)
         self.blocks = nn.Sequential(*[Block(n_embd, n_head=n_head) for _ in range(n_layer)])
         self.ln_f = nn.RMSNorm(n_embd) # final layer norm
         self.lm_head = nn.Linear(n_embd, vocab_size)
@@ -162,8 +181,9 @@ class GPTLanguageModel(nn.Module):
 
         # idx and targets are both (B,T) tensor of integers
         tok_emb = self.token_embedding_table(idx) # (B,T,C)
-        pos_emb = self.position_embedding_table(torch.arange(T, device=device)) # (T,C)
-        x = tok_emb + pos_emb # (B,T,C)
+        # pos_emb = self.position_embedding_table(torch.arange(T, device=device)) # (T,C)
+        x = tok_emb
+        # x = tok_emb + pos_emb # (B,T,C)
         x = self.blocks(x) # (B,T,C)
         x = self.ln_f(x) # (B,T,C)
         logits = self.lm_head(x) # (B,T,vocab_size)
