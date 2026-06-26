@@ -75,17 +75,26 @@ class Head(nn.Module):
         self.key = nn.Linear(n_embd, head_size, bias=False)
         self.query = nn.Linear(n_embd, head_size, bias=False)
         self.value = nn.Linear(n_embd, head_size, bias=False)
+        self.k_cache = None
+        self.v_cache = None
         self.register_buffer('tril', torch.tril(torch.ones(block_size, block_size)))
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, x):
+    def forward(self, x, use_cache=False):
         # input of size (batch, time-step, channels)
         # output of size (batch, time-step, head size)
         B,T,C = x.shape
         k = self.key(x)   # (B,T,hs)
         q = self.query(x) # (B,T,hs)
+        
         hs = q.shape[-1]
-        positions = torch.arange(T, device=device)
+        # positions = torch.arange(T, device=device)
+        past_length = 0 if self.k_cache is None else self.k_cache.shape[1]
+        positions = torch.arange(
+            past_length,
+            past_length + T,
+            device=device
+        )
         freqs = torch.tensor([10000**(-2*i/hs) for i in range(hs//2)], device=device)
         angles = positions[:, None] * freqs[None, :]
         sin = torch.sin(angles)
@@ -97,6 +106,23 @@ class Head(nn.Module):
         # print(q.shape)
         # print(cos.shape)
         # print(rotate_half(q).shape)
+
+        if use_cache:
+            if self.k_cache is None:
+                self.k_cache = k
+                self.v_cache = v
+            else:
+                self.k_cache = torch.cat(
+                    [self.k_cache, k],
+                    dim=1
+                )
+
+                self.v_cache = torch.cat(
+                    [self.v_cache, v],
+                    dim=1
+                )
+            k = self.k_cache
+            v = self.v_cache
 
         # compute attention scores ("affinities")
         wei = q @ k.transpose(-2,-1) * k.shape[-1]**-0.5 # (B, T, hs) @ (B, hs, T) -> (B, T, T)
@@ -117,8 +143,8 @@ class MultiHeadAttention(nn.Module):
         self.proj = nn.Linear(head_size * num_heads, n_embd)
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, x):
-        out = torch.cat([h(x) for h in self.heads], dim=-1)
+    def forward(self, x, use_cache=False):
+        out = torch.cat([h(x, use_cache) for h in self.heads], dim=-1)
         out = self.dropout(self.proj(out))
         return out
 
@@ -149,8 +175,8 @@ class Block(nn.Module):
         self.ln1 = nn.RMSNorm(n_embd)
         self.ln2 = nn.RMSNorm(n_embd)
 
-    def forward(self, x):
-        x = x + self.sa(self.ln1(x))
+    def forward(self, x, use_cache=False):
+        x = x + self.sa(self.ln1(x), use_cache)
         x = x + self.ffwd(self.ln2(x))
         return x
 
@@ -168,6 +194,12 @@ class GPTLanguageModel(nn.Module):
         # better init, not covered in the original GPT video, but important, will cover in followup video
         self.apply(self._init_weights)
 
+    def clear_cache(self):
+        for block in self.blocks:
+            for head in block.sa.heads:
+                head.k_cache = None
+                head.v_cache = None
+
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
@@ -176,7 +208,7 @@ class GPTLanguageModel(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, idx, targets=None):
+    def forward(self, idx, targets=None, use_cache=False):
         B, T = idx.shape
 
         # idx and targets are both (B,T) tensor of integers
@@ -184,7 +216,8 @@ class GPTLanguageModel(nn.Module):
         # pos_emb = self.position_embedding_table(torch.arange(T, device=device)) # (T,C)
         x = tok_emb
         # x = tok_emb + pos_emb # (B,T,C)
-        x = self.blocks(x) # (B,T,C)
+        for block in self.blocks: # (B,T,C)
+            x = block(x, use_cache)
         x = self.ln_f(x) # (B,T,C)
         logits = self.lm_head(x) # (B,T,vocab_size)
 
@@ -199,12 +232,14 @@ class GPTLanguageModel(nn.Module):
         return logits, loss
 
     def generate(self, idx, max_new_tokens):
+        self.clear_cache()
         # idx is (B, T) array of indices in the current context
         for _ in range(max_new_tokens):
             # crop idx to the last block_size tokens
-            idx_cond = idx[:, -block_size:]
+            # idx_cond = idx[:, -block_size:]
             # get the predictions
-            logits, loss = self(idx_cond)
+            # logits, loss = self(idx_cond)
+            logits, loss = self(idx[:, -1:], use_cache=True)
             # focus only on the last time step
             logits = logits[:, -1, :] # becomes (B, C)
             # apply softmax to get probabilities
